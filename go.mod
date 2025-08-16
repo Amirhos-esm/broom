@@ -1,4 +1,4 @@
-module github.com/Amirhos-esm/Broom
+module github.com/Amirhos-esm/broom
 
 go 1.23.3
 
