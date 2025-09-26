@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	Broom "github.com/Amirhos-esm/Broom"
+	Broom "github.com/Amirhos-esm/broom"
 )
 
 func main() {
