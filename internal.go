@@ -93,6 +93,21 @@ func (br *Broom) handleQueue(op broomOperation) {
 				err: nil,
 			}
 		}
+	case OperationRecheck:
+		if folder, exist := br.folders[op.folder.Location]; !exist {
+			ret = &broomOperationResponse{
+				err: ERROR_FOLDER_NOT_EXIST,
+			}
+		} else {
+			err := br.checkFolder(&folder)
+			if err == nil {
+				br.folders[op.folder.Location] = folder // write back modified value
+			}
+			ret = &broomOperationResponse{
+				err: err,
+			}
+		}
+
 	default:
 		panic("not handled operation")
 	}

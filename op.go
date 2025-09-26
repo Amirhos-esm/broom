@@ -7,6 +7,7 @@ const (
 	OperationRemove
 	OperationGet
 	OperationPing
+	OperationRecheck
 )
 
 type broomOperationResponse struct {

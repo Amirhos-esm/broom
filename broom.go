@@ -100,6 +100,25 @@ func (br *Broom) AddFolder(location string, maxSize Size) error {
 	}
 }
 
+// scan and recheck folder without waiting for interval
+func (br *Broom) RecheckFolder(location string, maxSize Size) error {
+	if !br.isStarted {
+		return ERROR_NOT_STARTED
+	}
+	op := broomOperation{
+		op: OperationRecheck,
+		folder: BroomFolder{
+			Location: location,
+		},
+		sig: make(chan broomOperationResponse),
+	}
+	br.operationQueue <- op
+	select {
+	case x := <-op.sig:
+		return x.err
+	}
+}
+
 // RemoveFolder removes a folder from the broom management system by location.
 // Returns an error if the broom is not started or if the folder does not exist.
 func (br *Broom) RemoveFolder(location string) error {
