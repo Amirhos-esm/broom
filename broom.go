@@ -101,7 +101,7 @@ func (br *Broom) AddFolder(location string, maxSize Size) error {
 }
 
 // scan and recheck folder without waiting for interval
-func (br *Broom) RecheckFolder(location string, maxSize Size) error {
+func (br *Broom) RecheckFolder(location string) error {
 	if !br.isStarted {
 		return ERROR_NOT_STARTED
 	}
