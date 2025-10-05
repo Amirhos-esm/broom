@@ -55,7 +55,7 @@ func TestRealFileDeletionAfterSizeLimit(t *testing.T) {
 	br := NewBroom(1 * time.Second)
 	// br.RemovingStrategy = DEFAULT_REMOVING_STRATEGY // old files first
 
-	br.Run()
+	br.Start()
 	defer br.Stop()
 
 	// Add folder with max size 1 MB (1,000,000 bytes)

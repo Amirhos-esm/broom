@@ -1,6 +1,7 @@
 package broom
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"time"
@@ -44,12 +45,53 @@ type BroomFolder struct {
 	Location    string
 	MaxSize     Size
 	CurrentSize Size
+	list        *list.List
+	parent      *Broom
 }
 
 func (bf BroomFolder) String() string {
 	return fmt.Sprintf("BroomFolder{ Location: %q, MaxSize: %v, CurrentSize: %v }",
 		bf.Location, bf.MaxSize, bf.CurrentSize)
 }
+func (bf *BroomFolder) scan() error {
+	files, err := collectFiles(bf.Location, bf.parent.exts, false)
+	if err != nil {
+		return err
+	}
+	// calculate total size of the directory
+	totalSize := Size(0)
+	for x, _ := range files {
+		if !files[x].IsDir {
+			totalSize += files[x].Size
+		}
+	}
+	bf.CurrentSize = totalSize
+
+	sortFilesByCreateTime(files)
+	bf.list = toLinkedList(files)
+	return nil
+}
+func (bf *BroomFolder) delete() error {
+	if bf.list == nil {
+		return nil
+	}
+	br := bf.parent
+	if bf.MaxSize != 0 && bf.MaxSize < bf.CurrentSize {
+		if br.RemovingStrategy != nil {
+			rms := br.RemovingStrategy(bf, bf.list, bf.CurrentSize-bf.MaxSize)
+			err := DeleteFiles(rms)
+			if br.onRemoveCb != nil {
+				br.onRemoveCb(bf,rms)
+			}
+			if err == nil {
+				bf.CurrentSize -= calculateFolderSize(rms)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 
 func (br *Broom) handleQueue(op broomOperation) {
 	var ret *broomOperationResponse
@@ -57,10 +99,10 @@ func (br *Broom) handleQueue(op broomOperation) {
 	case OperationAdd:
 		if _, exist := br.folders[op.folder.Location]; exist {
 			ret = &broomOperationResponse{
-				err: ERROR_FOLDER_EXIST,
+				err: ErrFolderExist,
 			}
 		} else {
-			br.folders[op.folder.Location] = op.folder
+			br.folders[op.folder.Location] = &op.folder
 			ret = &broomOperationResponse{
 				err: nil,
 			}
@@ -68,14 +110,14 @@ func (br *Broom) handleQueue(op broomOperation) {
 	case OperationGet:
 		if got, exist := br.folders[op.folder.Location]; !exist {
 			ret = &broomOperationResponse{
-				err: ERROR_FOLDER_NOT_EXIST,
+				err: ErrFolderNotExist,
 			}
 
 		} else {
 
 			ret = &broomOperationResponse{
 				err:  nil,
-				data: got,
+				data: *got,
 			}
 		}
 	case OperationPing:
@@ -85,7 +127,7 @@ func (br *Broom) handleQueue(op broomOperation) {
 	case OperationRemove:
 		if _, exist := br.folders[op.folder.Location]; !exist {
 			ret = &broomOperationResponse{
-				err: ERROR_FOLDER_NOT_EXIST,
+				err: ErrFolderNotExist,
 			}
 		} else {
 			delete(br.folders, op.folder.Location)
@@ -96,7 +138,7 @@ func (br *Broom) handleQueue(op broomOperation) {
 	case OperationRecheck:
 		if folder, exist := br.folders[op.folder.Location]; !exist {
 			ret = &broomOperationResponse{
-				err: ERROR_FOLDER_NOT_EXIST,
+				err: ErrFolderNotExist,
 			}
 		} else {
 			err := br.checkFolder(&folder)
@@ -148,7 +190,7 @@ func (br *Broom) checkFolder(folder *BroomFolder) error {
 	if folder.MaxSize != 0 && folder.MaxSize < folder.CurrentSize {
 		if br.RemovingStrategy != nil {
 			rms := br.RemovingStrategy(folder, files, folder.CurrentSize-folder.MaxSize)
-			err :=  DeleteFiles(rms)
+			err := DeleteFiles(rms)
 			if err == nil {
 				folder.CurrentSize -= calculateFolderSize(rms)
 			}
@@ -157,42 +199,12 @@ func (br *Broom) checkFolder(folder *BroomFolder) error {
 	}
 	return nil
 }
-func (br *Broom) loop() {
-	br.mutex.Lock()
-
-	if br.isStarted {
-		br.mutex.Unlock()
-		return
-	}
-	br.isStarted = true
-	ctx, cancel := context.WithCancel(context.Background())
-	br.cancel = cancel
-	defer cancel()
-
-	br.endSig = make(chan struct{})
-	br.mutex.Unlock()
+func (br *Broom) loop(ctx context.Context) {
 
 	for {
-		for key, folder := range br.folders {
-			err := br.checkFolder(&folder)
-			if err != nil {
-				// handle error
-			}
-			br.folders[key] = folder // write back modified value
-			if br.handle(0, ctx) {
-				goto exit
-			}
-		}
 		if br.handle(br.sweepTime, ctx) {
 			goto exit
 		}
-
-		// if br.handle(time.Second * , ctx) {
-		// 	goto exit
-		// }
-
 	}
 exit:
-	close(br.endSig)
-
 }
