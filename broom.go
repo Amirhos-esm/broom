@@ -27,7 +27,7 @@ type RemovingStrategy func(folder *BroomFolder, files *list.List, needReduce Siz
 type OnRemoveCallback func(folder *BroomFolder, fileToRemove []File)
 
 // MetadateReader use can add metadata to each file so it will be saved and user can read it
-type MetadateReader func(folder *BroomFolder, file *File) any
+type MetadateReader func(folder *BroomFolder, file *File) 
 
 // Broom manages a set of folders and periodically sweeps them to remove files
 // based on the configured RemovingStrategy. It handles operations via a queue
@@ -41,6 +41,7 @@ type Broom struct {
 	RemovingStrategy RemovingStrategy
 	onRemoveCb       OnRemoveCallback
 	sweepTime        time.Duration
+	metaDataReader   MetadateReader
 	// state
 }
 

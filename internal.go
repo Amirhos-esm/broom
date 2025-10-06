@@ -4,7 +4,11 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"log"
+	"sync"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 type Size uint64
@@ -47,17 +51,155 @@ type BroomFolder struct {
 	CurrentSize Size
 	list        *list.List
 	parent      *Broom
+	watcher     *fsnotify.Watcher
 }
 
 func (bf BroomFolder) String() string {
 	return fmt.Sprintf("BroomFolder{ Location: %q, MaxSize: %v, CurrentSize: %v }",
 		bf.Location, bf.MaxSize, bf.CurrentSize)
 }
+func (bf *BroomFolder) isInitialized() bool {
+	return bf.list != nil
+}
+
+func (bf *BroomFolder) onFolderEvent(event fsnotify.Event) {
+	switch {
+	case event.Has(fsnotify.Create):
+		log.Printf("[+] New file: %s\n", event.Name)
+		// bf.Rescan()
+	case event.Has(fsnotify.Write):
+		log.Printf("[~] Modified: %s\n", event.Name)
+	case event.Has(fsnotify.Remove):
+		log.Printf("[-] Removed: %s\n", event.Name)
+		// bf.Rescan()
+	case event.Has(fsnotify.Rename):
+		log.Printf("[>] Renamed: %s\n", event.Name)
+		// bf.Rescan()
+	}
+}
+func (bf *BroomFolder) deInit() {
+	if !bf.isInitialized() {
+		return
+	}
+	if bf.watcher != nil {
+		bf.watcher.Close()
+	}
+	if bf.list != nil {
+		bf.list = nil
+	}
+}
+func (bf *BroomFolder) fetchMetadata() {
+	if bf.isInitialized() {
+		return
+	}
+	if bf.parent.metaDataReader == nil {
+		return
+	}
+	const MaxSimultaneouslyGoroutine int = 10
+	var wg sync.WaitGroup
+	// Foreach style loop
+	i := 0
+	for e := bf.list.Front(); e != nil; e = e.Next() {
+		file := e.Value.(File)
+		file.Metadata = nil
+		file.Metadata = map[string]any{}
+		wg.Add(1)
+		go func(folder *BroomFolder, file File) {
+			bf.parent.metaDataReader(folder, &file)
+			wg.Done()
+		}(bf, file)
+		i++
+		if (i % MaxSimultaneouslyGoroutine) == 0 {
+			wg.Wait()
+		}
+
+	}
+	wg.Wait()
+}
+
+// func (bf *BroomFolder) fetchMetadata() {
+// 	if bf.isInitialized() {
+// 		return
+// 	}
+// 	if bf.parent.metaDataReader == nil {
+// 		return
+// 	}
+
+// 	const MaxSimultaneousGoroutines = 10
+// 	var wg sync.WaitGroup
+// 	sem := make(chan struct{}, MaxSimultaneousGoroutines) // limit concurrency
+
+// 	for e := bf.list.Front(); e != nil; e = e.Next() {
+// 		file := e.Value.(File)
+
+// 		wg.Add(1)
+// 		sem <- struct{}{} // acquire a slot
+
+// 		go func(folder *BroomFolder, f File) {
+// 			defer wg.Done()
+// 			defer func() { <-sem }() // release slot when done
+
+// 			bf.parent.metaDataReader(folder, &f)
+// 		}(bf, file)
+// 	}
+
+//		wg.Wait()
+//	}
+func (bf *BroomFolder) watch() {
+	// Start listening for events.
+	go func(bf *BroomFolder) {
+		for {
+			select {
+			case event, ok := <-bf.watcher.Events:
+				if !ok {
+					return
+				}
+				bf.onFolderEvent(event)
+			case err, ok := <-bf.watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}(bf)
+
+}
+func (bf *BroomFolder) initialize() error {
+	if bf.isInitialized() {
+		return nil
+	}
+
+	if err := bf.scan(); err != nil {
+		return err
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+	bf.watcher = watcher
+	bf.watch()
+
+	if err := bf.watcher.Add(bf.Location); err != nil {
+		bf.watcher.Close()
+		return fmt.Errorf("failed to watch folder %q: %w", bf.Location, err)
+	}
+
+	bf.fetchMetadata()
+	if err := bf.check(); err != nil {
+		bf.deInit()
+		return err
+	}
+
+	return nil
+}
 func (bf *BroomFolder) scan() error {
 	files, err := collectFiles(bf.Location, bf.parent.exts, false)
 	if err != nil {
 		return err
 	}
+	bf.list = nil
 	// calculate total size of the directory
 	totalSize := Size(0)
 	for x, _ := range files {
@@ -71,8 +213,10 @@ func (bf *BroomFolder) scan() error {
 	bf.list = toLinkedList(files)
 	return nil
 }
-func (bf *BroomFolder) delete() error {
-	if bf.list == nil {
+
+// check folder if execed max size it will delete some files
+func (bf *BroomFolder) check() error {
+	if !bf.isInitialized() {
 		return nil
 	}
 	br := bf.parent
@@ -81,7 +225,7 @@ func (bf *BroomFolder) delete() error {
 			rms := br.RemovingStrategy(bf, bf.list, bf.CurrentSize-bf.MaxSize)
 			err := DeleteFiles(rms)
 			if br.onRemoveCb != nil {
-				br.onRemoveCb(bf,rms)
+				br.onRemoveCb(bf, rms)
 			}
 			if err == nil {
 				bf.CurrentSize -= calculateFolderSize(rms)
@@ -91,7 +235,6 @@ func (bf *BroomFolder) delete() error {
 	}
 	return nil
 }
-
 
 func (br *Broom) handleQueue(op broomOperation) {
 	var ret *broomOperationResponse
@@ -114,9 +257,12 @@ func (br *Broom) handleQueue(op broomOperation) {
 			}
 
 		} else {
-
+			var err error
+			if !got.isInitialized() {
+				err = got.initialize()
+			}
 			ret = &broomOperationResponse{
-				err:  nil,
+				err:  err,
 				data: *got,
 			}
 		}
@@ -125,11 +271,12 @@ func (br *Broom) handleQueue(op broomOperation) {
 			err: nil,
 		}
 	case OperationRemove:
-		if _, exist := br.folders[op.folder.Location]; !exist {
+		if folder, exist := br.folders[op.folder.Location]; !exist {
 			ret = &broomOperationResponse{
 				err: ErrFolderNotExist,
 			}
 		} else {
+			folder.deInit()
 			delete(br.folders, op.folder.Location)
 			ret = &broomOperationResponse{
 				err: nil,
@@ -141,10 +288,8 @@ func (br *Broom) handleQueue(op broomOperation) {
 				err: ErrFolderNotExist,
 			}
 		} else {
-			err := br.checkFolder(&folder)
-			if err == nil {
-				br.folders[op.folder.Location] = folder // write back modified value
-			}
+			folder.deInit()
+			err := folder.initialize()
 			ret = &broomOperationResponse{
 				err: err,
 			}
@@ -181,24 +326,25 @@ func (br *Broom) handle(wait time.Duration, ctx context.Context) bool {
 		}
 	}
 }
-func (br *Broom) checkFolder(folder *BroomFolder) error {
-	files, err := ListFiles(folder.Location)
-	if err != nil {
-		return err
-	}
-	folder.CurrentSize = calculateFolderSize(files)
-	if folder.MaxSize != 0 && folder.MaxSize < folder.CurrentSize {
-		if br.RemovingStrategy != nil {
-			rms := br.RemovingStrategy(folder, files, folder.CurrentSize-folder.MaxSize)
-			err := DeleteFiles(rms)
-			if err == nil {
-				folder.CurrentSize -= calculateFolderSize(rms)
-			}
-			return err
-		}
-	}
-	return nil
-}
+
+//	func (br *Broom) checkFolder(folder *BroomFolder) error {
+//		files, err := ListFiles(folder.Location)
+//		if err != nil {
+//			return err
+//		}
+//		folder.CurrentSize = calculateFolderSize(files)
+//		if folder.MaxSize != 0 && folder.MaxSize < folder.CurrentSize {
+//			if br.RemovingStrategy != nil {
+//				rms := br.RemovingStrategy(folder, files, folder.CurrentSize-folder.MaxSize)
+//				err := DeleteFiles(rms)
+//				if err == nil {
+//					folder.CurrentSize -= calculateFolderSize(rms)
+//				}
+//				return err
+//			}
+//		}
+//		return nil
+//	}
 func (br *Broom) loop(ctx context.Context) {
 
 	for {
